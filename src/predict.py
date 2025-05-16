@@ -11,12 +11,13 @@ import glob
 IMG_DIM = 128 # Must match training
 IMG_SHAPE = (IMG_DIM, IMG_DIM, 1)
 NUM_EXAMPLES_CONDITION = 5
-MODEL_PATH = "trained_models/cat_pixelart_generator.keras" # Path to your new saved model
+MODEL_PATH = "trained_models/final_cat_pixelart_generator.keras" # Path to your new saved model
 
-BASE_PROCESSED_DATA_DIR_FOR_SAMPLING = "../processed_data/"
+BASE_PROCESSED_DATA_DIR_FOR_SAMPLING = "dataset/processed/pixel_art_cat/"
 EDGE_DETAILS_DIR_SAMPLING = os.path.join(BASE_PROCESSED_DATA_DIR_FOR_SAMPLING, "edge_details/")
 OUTLINE_MASKS_DIR_SAMPLING = os.path.join(BASE_PROCESSED_DATA_DIR_FOR_SAMPLING, "outline_masks/")
 
+print(EDGE_DETAILS_DIR_SAMPLING, OUTLINE_MASKS_DIR_SAMPLING)
 
 # --- Load Model ---
 if not os.path.exists(MODEL_PATH):
@@ -48,10 +49,15 @@ def get_prediction_samples(edge_dir, outline_dir, num_examples, num_outlines_to_
     while len(sampled_example_bases) < num_examples:
         sampled_example_bases.append(random.choice(valid_base_filenames))
 
-    num_unique_needed_for_outlines = min(num_outlines_to_display, len(valid_base_filenames))
-    sampled_outline_bases = random.sample(valid_base_filenames, num_unique_needed_for_outlines)
+    # Ensure outlines are not from the example images
+    remaining_bases_for_outlines = list(set(valid_base_filenames) - set(sampled_example_bases))
+    if len(remaining_bases_for_outlines) < num_outlines_to_display:
+        raise ValueError("Not enough unique files to ensure outlines are not from the example images.")
+
+    num_unique_needed_for_outlines = min(num_outlines_to_display, len(remaining_bases_for_outlines))
+    sampled_outline_bases = random.sample(remaining_bases_for_outlines, num_unique_needed_for_outlines)
     while len(sampled_outline_bases) < num_outlines_to_display:
-        sampled_outline_bases.append(random.choice(valid_base_filenames))
+        sampled_outline_bases.append(random.choice(remaining_bases_for_outlines))
 
 
     example_images_data = []
