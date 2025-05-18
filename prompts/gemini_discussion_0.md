@@ -265,7 +265,7 @@ def build_combined_model(img_shape=(128, 128, 1), num_examples=5, example_latent
         averaged_features = example_features[0]
     generator = build_generator(outline_input_shape=img_shape, example_latent_dim=example_latent_dim, num_filters_base=gen_filters_base)
     generated_output = generator([outline_input, averaged_features])
-    combined_model = Model(inputs=example_img_inputs + [outline_input], outputs=generated_output, name="pixel_art_cat_generator")
+    combined_model = Model(inputs=example_img_inputs + [outline_input], outputs=generated_output, name="grayscale_cat_generator")
     return combined_model, example_encoder, generator
 ```
 
