@@ -13,75 +13,76 @@ IMG_DIM = 128  # Must match TARGET_SIZE in prepare_data.py
 IMG_SHAPE = (IMG_DIM, IMG_DIM, 1)
 NUM_EXAMPLES_CONDITION = 5
 BATCH_SIZE = 8  # Adjusted for 128x128, may need further tuning
-EPOCHS = 500
-LEARNING_RATE = 4e-4
+EPOCHS = 200
+LEARNING_RATE = 1e-4
 EXAMPLE_LATENT_DIM = 64
 GEN_FILTERS_BASE = 16
 
-BASE_PROCESSED_DATA_DIR = "dataset/processed/grayscale_cat/" # Preserved path
-GRAYSCALE_CATS_DIR = os.path.join(BASE_PROCESSED_DATA_DIR, "grayscale_cats/") # Updated
-OUTLINE_MASKS_DIR = os.path.join(BASE_PROCESSED_DATA_DIR, "outline_masks/") # Preserved path
-MODEL_SAVE_DIR = "trained_models/"                   # Preserved path
-MODEL_NAME = "cat_grayscale_generator.keras" # Preserved path (consider _v3 if you want to keep old model)
+# Paths from your provided file
+BASE_PROCESSED_DATA_DIR = "dataset/processed/grayscale_augmented_cat/" # Not directly used for sub-folders below, but kept for context
+GRAYSCALE_CATS_DIR = "dataset/processed/grayscale_augmented_cat/grayscale_cats/" # Using this for grayscale images
+OUTLINE_MASKS_DIR = "dataset/processed/grayscale_augmented_cat/outline_masks/"
+MODEL_SAVE_DIR = "trained_models/"
+MODEL_NAME = "cat_grayscale_augmented_generator.keras"
 
 # --- Load Data ---
-def load_paired_data(grayscale_cats_dir, outline_masks_dir, img_dim_tuple):
-    grayscale_files_pattern = os.path.join(grayscale_cats_dir, "*_grayscale.npy") # Updated pattern
-    all_grayscale_file_paths = sorted(glob.glob(grayscale_files_pattern))
+def load_paired_data(primary_data_dir, outline_masks_dir, img_dim_tuple, primary_suffix="_grayscale.npy"): # primary_suffix
+    primary_files_pattern = os.path.join(primary_data_dir, f"*{primary_suffix}")
+    all_primary_file_paths = sorted(glob.glob(primary_files_pattern))
 
-    paired_grayscale_data = []
+    paired_primary_data = [] # e.g., grayscale cats
     paired_outline_data = []
 
-    if not all_grayscale_file_paths:
+    if not all_primary_file_paths:
         raise FileNotFoundError(
-            f"No grayscale cat files found in {grayscale_cats_dir}. Run prepare_data.py first.")
+            f"No primary data files (e.g., *{primary_suffix}) found in {primary_data_dir}. Run prepare_data.py first.")
 
-    for gs_fpath in all_grayscale_file_paths:
+    for p_fpath in all_primary_file_paths:
         base_filename = os.path.basename(
-            gs_fpath).replace("_grayscale.npy", "") # Updated replace
+            p_fpath).replace(primary_suffix, "")
         expected_outline_fname = f"{base_filename}_outline.npy"
         outline_fpath = os.path.join(outline_masks_dir, expected_outline_fname)
 
         if os.path.exists(outline_fpath):
             try:
-                gs_img = np.load(gs_fpath)
+                p_img = np.load(p_fpath)
                 outline_img = np.load(outline_fpath)
 
-                if gs_img.shape != img_dim_tuple[:2]:  # Check only H,W
-                    gs_img = cv2.resize(
-                        gs_img, img_dim_tuple[:2], interpolation=cv2.INTER_NEAREST) # INTER_AREA might be better for grayscale
+                if p_img.shape != img_dim_tuple[:2]:
+                    p_img = cv2.resize(
+                        p_img, img_dim_tuple[:2], interpolation=cv2.INTER_AREA) # INTER_AREA better for grayscale
                 if outline_img.shape != img_dim_tuple[:2]:
                     outline_img = cv2.resize(
                         outline_img, img_dim_tuple[:2], interpolation=cv2.INTER_NEAREST)
 
-                paired_grayscale_data.append(gs_img.reshape(img_dim_tuple))
+                paired_primary_data.append(p_img.reshape(img_dim_tuple))
                 paired_outline_data.append(outline_img.reshape(img_dim_tuple))
             except Exception as e:
                 print(
                     f"Warning: Error loading or processing pair for {base_filename}: {e}. Skipping.")
         else:
             print(
-                f"Warning: Outline mask {expected_outline_fname} not found for grayscale cat {os.path.basename(gs_fpath)}. Skipping pair.")
+                f"Warning: Outline mask {expected_outline_fname} not found for primary data {os.path.basename(p_fpath)}. Skipping pair.")
 
-    if not paired_grayscale_data:
+    if not paired_primary_data:
         raise ValueError(
-            "No valid pairs of grayscale cats and outline masks found after loading.")
+            "No valid pairs of primary data and outline masks found after loading.")
 
-    return np.array(paired_grayscale_data), np.array(paired_outline_data)
+    return np.array(paired_primary_data), np.array(paired_outline_data)
 
 
 all_grayscale_images_np, all_outline_images_np = load_paired_data(
-    GRAYSCALE_CATS_DIR, OUTLINE_MASKS_DIR, IMG_SHAPE) # Updated variable name
+    GRAYSCALE_CATS_DIR, OUTLINE_MASKS_DIR, IMG_SHAPE, primary_suffix="_grayscale.npy")
 print(
-    f"Loaded {len(all_grayscale_images_np)} paired B&W grayscale cat and outline mask images.")
+    f"Loaded {len(all_grayscale_images_np)} paired grayscale cat and outline mask images.")
 
 if len(all_grayscale_images_np) < NUM_EXAMPLES_CONDITION + 1:
     raise ValueError(
         f"Not enough images. Need at least {NUM_EXAMPLES_CONDITION + 1} pairs, found {len(all_grayscale_images_np)}")
 
 # --- Data Generator ---
-def data_generator_fn(grayscale_images_dataset, outline_images_dataset, batch_size, num_examples_cond):
-    num_total_images = len(grayscale_images_dataset)
+def data_generator_fn(primary_images_dataset, outline_images_dataset, batch_size, num_examples_cond): # Renamed primary_images_dataset
+    num_total_images = len(primary_images_dataset)
     indices = np.arange(num_total_images)
 
     while True:
@@ -90,12 +91,12 @@ def data_generator_fn(grayscale_images_dataset, outline_images_dataset, batch_si
         for i in range(0, num_total_images, batch_size):
             batch_indices_overall = indices[i:i + batch_size]
 
-            if len(batch_indices_overall) < batch_size: # Skip incomplete batches for from_generator
+            if len(batch_indices_overall) < batch_size:
                 continue
 
             batch_example_inputs_list = [[] for _ in range(num_examples_cond)]
             batch_outline_inputs_for_generator = []
-            batch_target_outputs = [] # This will now store grayscale cat images
+            batch_target_outputs = []
 
             for master_idx in batch_indices_overall:
                 target_idx_in_dataset = master_idx
@@ -108,26 +109,27 @@ def data_generator_fn(grayscale_images_dataset, outline_images_dataset, batch_si
                 else:
                     example_indices_for_instance = random.sample(possible_example_indices, num_examples_cond)
 
-                # Load example images (grayscale cats)
-                example_imgs = grayscale_images_dataset[example_indices_for_instance]
+                # Load example images (primary data, e.g., grayscale cats)
+                example_imgs = primary_images_dataset[example_indices_for_instance]
 
                 # Load the outline mask that the generator should fill
                 outline_input_for_gen = outline_images_dataset[target_idx_in_dataset]
                 
-                # The target output for the model is the GRAYSCALE CAT image corresponding to the input outline
-                target_img_grayscale = grayscale_images_dataset[target_idx_in_dataset] 
+                # The target output for the model is the PRIMARY DATA image corresponding to the input outline
+                target_img_primary = primary_images_dataset[target_idx_in_dataset] 
                 
                 for k in range(num_examples_cond):
                     batch_example_inputs_list[k].append(example_imgs[k])
 
                 batch_outline_inputs_for_generator.append(outline_input_for_gen)
-                batch_target_outputs.append(target_img_grayscale) # Append the grayscale cat as target
+                batch_target_outputs.append(target_img_primary)
 
             final_batch_example_inputs = [np.array(lst) for lst in batch_example_inputs_list]
             final_batch_outline_inputs_for_generator = np.array(batch_outline_inputs_for_generator)
             final_batch_target_outputs = np.array(batch_target_outputs)
             
-            # Yield NumPy arrays. tf.data.Dataset.from_generator will handle tensor conversion.
+            # Tensorflow's from_generator expects numpy arrays or Python native types.
+            # It will handle the conversion to Tensors internally.
             model_inputs_np = tuple(final_batch_example_inputs + [final_batch_outline_inputs_for_generator])
             model_targets_np = final_batch_target_outputs
             
@@ -145,30 +147,42 @@ def main():
         gen_filters_base=GEN_FILTERS_BASE
     )
     combined_model.summary()
-
-    # Custom loss: BCE applied only within the target outline mask
-    # The outline_mask is 0 for cat, 1 for background. We want loss where mask is 0 (cat).
-    # So, we use (1.0 - outline_mask) which is 1 for cat, 0 for background.
-    # This requires passing the outline_mask_of_target_image alongside y_true and y_pred.
-    # Simpler: Just use standard BCE. The model should learn to generate white (1.0) for the background
-    # if the target grayscale images consistently have a white background around the cat.
-    # The input outline_mask to the generator helps it know where to *focus* its generation.
     
     combined_model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss=tf.keras.losses.BinaryCrossentropy(), # Or MeanSquaredError for grayscale
-        metrics=['accuracy'] # 'mae' might be more interpretable for grayscale regression
+        loss=tf.keras.losses.MeanSquaredError(), # Or MeanSquaredError if grayscale values are not strictly 0/1
+        metrics=['mae', 'accuracy'] # MAE is good for grayscale regression, accuracy for BCE-like scenario
     )
+    
+    # In train.py, after model compilation
+    # Assuming outline_input_for_gen is (batch, H, W, 1) where 0 is cat, 1 is bg
+    # and target_img_grayscale is the ground truth
+
+    # You would need to pass the target outline mask to the loss function or calculate loss manually.
+    # A custom training loop (model.train_on_batch) gives more flexibility here.
+    # With model.fit(), you'd need a custom loss function:
+
+    def masked_mse_loss(outline_mask_for_target): # This needs to be part of y_true or a separate input
+        def loss(y_true_gs, y_pred_gs):
+            mask = 1.0 - outline_mask_for_target # Mask is 1 where cat is, 0 where bg is
+            squared_difference = tf.square(y_true_gs - y_pred_gs)
+            masked_squared_difference = squared_difference * mask
+            return tf.reduce_sum(masked_squared_difference) / tf.reduce_sum(mask) # Average over masked pixels
+        return loss
+
+    # This gets complicated with model.fit() data pipeline.
+    # Simplest first step: Ensure your grayscale target images have a very consistent background (e.g., perfect 1.0)
+    # and the model learns this from the data.
 
     train_gen_tf_dataset = tf.data.Dataset.from_generator(
-        lambda: data_generator_fn( # Use a lambda to pass arguments to the generator
+        lambda: data_generator_fn( 
             all_grayscale_images_np, all_outline_images_np, BATCH_SIZE, NUM_EXAMPLES_CONDITION),
         output_signature=(
-            tuple([tf.TensorSpec(shape=(BATCH_SIZE, IMG_DIM, IMG_DIM, 1), dtype=tf.float32) for _ in range(NUM_EXAMPLES_CONDITION)] + \
-                  [tf.TensorSpec(shape=(BATCH_SIZE, IMG_DIM, IMG_DIM, 1), dtype=tf.float32)]),
-            tf.TensorSpec(shape=(BATCH_SIZE, IMG_DIM, IMG_DIM, 1), dtype=tf.float32)
+            tuple([tf.TensorSpec(shape=(None, IMG_DIM, IMG_DIM, 1), dtype=tf.float32) for _ in range(NUM_EXAMPLES_CONDITION)] + \
+                  [tf.TensorSpec(shape=(None, IMG_DIM, IMG_DIM, 1), dtype=tf.float32)]), # Use None for batch_size in signature
+            tf.TensorSpec(shape=(None, IMG_DIM, IMG_DIM, 1), dtype=tf.float32)
         )
-    )
+    ).prefetch(tf.data.AUTOTUNE) # Added prefetch for performance
     
     steps_per_epoch = len(all_grayscale_images_np) // BATCH_SIZE
 
@@ -203,7 +217,7 @@ def main():
     plt.ylabel('Loss')
     plt.xlabel('Epoch')
     plt.legend()
-    plt.savefig(os.path.join(MODEL_SAVE_DIR, "training_loss_plot_v2.png")) # Preserved plot name
+    plt.savefig(os.path.join(MODEL_SAVE_DIR, "training_loss_plot_v2.png"))
     # plt.show()
 
 if __name__ == "__main__":
