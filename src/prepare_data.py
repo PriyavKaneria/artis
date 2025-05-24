@@ -270,19 +270,19 @@ def main():
                 final_precise_outline_canvas = create_final_canvas_from_roi(
                     final_precise_mask_roi_for_current_content_np.copy(), TARGET_SIZE, is_for_outline_mask_target=True)
 
-                # if final_precise_outline_canvas is not None:
-                #     gs_path = os.path.join(OUTPUT_DIR_GRAYSCALECATS, f"{current_content_savename_base}_grayscale.npy")
-                #     ol_path = os.path.join(OUTPUT_DIR_OUTLINES, f"{current_content_savename_base}_outline.npy")
-                #     np.save(gs_path, final_grayscale_canvas)
-                #     np.save(ol_path, final_precise_outline_canvas)
-                #     total_saved_pairs += 1
-                # else:
-                #     print(f"    Skipping content {current_content_savename_base}: Precise outline canvas failed.")
-                #     continue # Skip approx outlines if precise one failed for this content
+                if final_precise_outline_canvas is not None:
+                    gs_path = os.path.join(OUTPUT_DIR_GRAYSCALECATS, f"{current_content_savename_base}_grayscale.npy")
+                    ol_path = os.path.join(OUTPUT_DIR_OUTLINES, f"{current_content_savename_base}_outline.npy")
+                    np.save(gs_path, final_grayscale_canvas)
+                    np.save(ol_path, final_precise_outline_canvas)
+                    total_saved_pairs += 1
+                else:
+                    print(f"    Skipping content {current_content_savename_base}: Precise outline canvas failed.")
+                    continue # Skip approx outlines if precise one failed for this content
 
                 # 2. Generate N_APPROX_OUTLINES_PER_MAIN_OUTLINE for the current content's shape
                 for approx_jdx in range(N_APPROX_OUTLINES_PER_MAIN_OUTLINE):
-                    approx_outline_savename_base = f"{current_content_savename_base}_approx{approx_jdx}"
+                    approx_outline_savename_base = f"{current_content_savename_base}_approx_{approx_jdx}"
                     
                     # Approximation is done on the ROI mask that defines the current content's shape
                     approximated_roi_mask_np = generate_approximate_outline_roi(
