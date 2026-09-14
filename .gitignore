@@ -1,6 +1,6 @@
-/.DS_Store
+.DS_Store
 /dataset
 /trained_models/*.keras
 /trained_models/*.h5
-
-__pycache__
+__pycache__/
+*.pyc

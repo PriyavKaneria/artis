@@ -1,169 +1,190 @@
 # src/predict.py
 import tensorflow as tf
 import numpy as np
-# import matplotlib.pyplot as plt # Not strictly needed for just printing tokens
+import matplotlib.pyplot as plt
 import os
 import random
 import glob
-# import cv2 # Not strictly needed for this specific test
+import cv2 
+
+# --- PyQt5 Imports ---
+import sys
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+                             QPushButton, QLabel, QGraphicsView, QGraphicsScene, QGraphicsPathItem)
+from PyQt5.QtGui import QPainter, QPen, QImage, QPixmap, QPainterPath
+from PyQt5.QtCore import Qt, QPointF
 
 # --- Import custom layers and model builder ---
-from model_def import build_combined_model_phase1, PatchEmbed, StyleEncoder, FiLMLayer # FiLMLayer for completeness if model saved with it
+from model_def import (FiLMLayer, PatchEmbed, StyleEncoder, SpatialPlanner, 
+                       AdaptiveBottleneck, AdaptiveGenerator, DistanceWeightedSoftSpatialLoss)
 
 # --- Configuration ---
 IMG_DIM = 128
 IMG_SHAPE = (IMG_DIM, IMG_DIM, 1)
-NUM_EXAMPLES_CONDITION = 5 # Must match how the StyleEncoder was trained
+NUM_EXAMPLES_CONDITION = 5
+MODEL_PATH = "trained_models/hybrid_generator_v1.keras" # Ensure this matches saved model
 
-# Model path for the combined model trained in Phase 1
-MODEL_PATH = "trained_models/cat_generator_style_encoder_v1.keras" # Or .h5 if you saved that
-
-# Data paths (using your existing structure for base grayscale images)
 OUTPUT_DIR_BASE_PROCESSED = "dataset/processed/grayscale_augmented_cat_v3/"
 GRAYSCALE_CATS_DIR_SAMPLING = os.path.join(OUTPUT_DIR_BASE_PROCESSED, "grayscale_cats/")
-# OUTLINE_MASKS_DIR_SAMPLING = os.path.join(OUTPUT_DIR_BASE_PROCESSED, "outline_masks/") # Not needed for this test
+OUTLINE_MASKS_DIR_SAMPLING = os.path.join(OUTPUT_DIR_BASE_PROCESSED, "outline_masks/")
 
-# StyleEncoder HParams (must match how the loaded model was built)
-PATCH_SIZE_STYLE_ENC = 16
-EMBED_DIM_STYLE_ENC = 128
-NUM_HEADS_STYLE_ENC = 4
-NUM_TRANS_LAYERS_STYLE_ENC = 2
-NUM_STYLE_TOKENS_ENC = 5
+USE_DATASET_OUTLINES = False
+USE_DRAWING_CANVAS = True
+NUM_DATASET_TEST_ITERATIONS = 3
+DRAWING_CANVAS_SIZE = 512
+PREVIEW_IMAGE_SIZE = 64
 
-print(f"Sampling grayscale from: {GRAYSCALE_CATS_DIR_SAMPLING}")
-
-# --- Load Full Combined Model ---
+# --- Load Model ---
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Trained model not found at {MODEL_PATH}.")
 try:
-    # Provide all custom objects the model might contain
     custom_objects_dict = {
-        'FiLMLayer': FiLMLayer,
-        'PatchEmbed': PatchEmbed,
-        'StyleEncoder': StyleEncoder,
-        # IMPORTANT: If LeakyReLU was used as a string 'leaky_relu' before, 
-        # but now it's a layer, this is fine.
-        # The problem was Keras trying to deserialize the *layer instance* from within the Conv2D config.
+        'FiLMLayer': FiLMLayer, 'PatchEmbed': PatchEmbed, 'StyleEncoder': StyleEncoder,
+        'SpatialPlanner': SpatialPlanner, 'AdaptiveBottleneck': AdaptiveBottleneck,
+        'AdaptiveGenerator': AdaptiveGenerator, 'DistanceWeightedSoftSpatialLoss': DistanceWeightedSoftSpatialLoss
     }
-    full_trained_model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects_dict)
-    print("Full trained model loaded successfully.")
+    trained_model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects_dict)
+    print("Trained Hybrid model loaded successfully.")
 except Exception as e:
-    print(f"Error loading model: {e}")
-    print("Ensure custom objects are correctly registered.")
-    exit()
+    print(f"Error loading Hybrid model: {e}"); exit()
 
-# --- Extract or Rebuild the StyleEncoder part ---
-# Option 1: If StyleEncoder was named and is a direct layer of the combined model
-try:
-    style_encoder_layer = full_trained_model.get_layer('style_encoder') # Must match the name in build_combined_model_phase1
-    print("StyleEncoder layer extracted from the combined model.")
-    # We can directly call this layer if its input signature matches what we provide.
-    # It expects a list of 5 input tensors.
-except ValueError:
-    print("Could not find a layer named 'style_encoder'. Rebuilding and transferring weights if possible, or using direct call if full model has suitable inputs.")
-    # Option 2: Rebuild the StyleEncoder with the same config and set weights (more complex)
-    # This is harder if the StyleEncoder class itself wasn't saved as a "model" with its own weights.
-    # For now, let's assume we can use the full model's inputs to get the style_tokens_output if direct layer access fails.
-    # Or, the StyleEncoder model object itself was what we wanted.
-    # In our build_combined_model_phase1, style_encoder_model IS the StyleEncoder instance.
-    # We need a way to make style_encoder_model callable with new inputs if we don't want to predict through the whole graph.
-    
-    # Simplest for now: Create an intermediate model from the full model's inputs to the style_tokens_output tensor.
-    # Find the tensor that is the output of style_encoder_model.call() before it's flattened.
-    # This requires knowing the name of that tensor or finding the layer.
-    # Let's assume `style_encoder_layer` above worked if StyleEncoder was named.
-    # If not, we can try to get it by finding a layer of type StyleEncoder:
-    found_style_encoder = None
-    for layer in full_trained_model.layers:
-        if isinstance(layer, StyleEncoder):
-            found_style_encoder = layer
-            break
-    if found_style_encoder:
-        style_encoder_layer = found_style_encoder
-        print("StyleEncoder instance found within the combined model's layers.")
-    else:
-        print("Could not extract StyleEncoder. Exiting. Check model structure and layer naming.")
-        exit()
-
-
-# --- Helper to load base grayscale image paths ---
-def get_base_grayscale_paths(grayscale_dir):
+# --- Helper Functions (mostly same as previous predict.py) ---
+def get_base_grayscale_paths(grayscale_dir): # Only for examples
     gs_pattern = os.path.join(grayscale_dir, "*_grayscale.npy")
     all_gs_paths = sorted(glob.glob(gs_pattern))
-    base_gs_paths = [p for p in all_gs_paths if "_aug" not in p and "_approx" not in p]
-    return base_gs_paths
+    return [p for p in all_gs_paths if "_aug" not in p.split('/')[-1] and "_approx" not in p.split('/')[-1]]
 
-BASE_GRAYSCALE_PATHS = get_base_grayscale_paths(GRAYSCALE_CATS_DIR_SAMPLING)
-if not BASE_GRAYSCALE_PATHS:
-    print("CRITICAL: No base grayscale images found for examples. Exiting.")
-    exit()
-if len(BASE_GRAYSCALE_PATHS) < NUM_EXAMPLES_CONDITION:
-    print(f"Warning: Only {len(BASE_GRAYSCALE_PATHS)} base images available, less than {NUM_EXAMPLES_CONDITION} needed for examples.")
+BASE_GRAYSCALE_PATHS_FOR_EXAMPLES = get_base_grayscale_paths(GRAYSCALE_CATS_DIR_SAMPLING)
+ALL_AVAILABLE_OUTLINE_PATHS = sorted(glob.glob(os.path.join(OUTLINE_MASKS_DIR_SAMPLING, "*_outline.npy")))
+
+if not BASE_GRAYSCALE_PATHS_FOR_EXAMPLES: print("Warning: No base grayscales for examples.")
+if not ALL_AVAILABLE_OUTLINE_PATHS: print("Warning: No outlines found for dataset mode.")
 
 
-# --- Prediction and Verification ---
-def test_style_encoder(style_encoder_model_or_layer, num_test_sets=3):
-    print(f"\n--- Testing Style Encoder with {num_test_sets} random example sets ---")
+def load_images_from_paths(paths_list, img_shape_tuple):
+    images = []
+    for path in paths_list:
+        try: images.append(np.load(path).reshape(img_shape_tuple))
+        except Exception as e: print(f"Warn: Load fail {path}: {e}")
+    return images
 
-    for i in range(num_test_sets):
-        print(f"\nTest Set {i+1}:")
+def np_to_qpixmap(np_array, target_size=None, is_mask=False):
+    # (Same np_to_qpixmap as previous predict.py)
+    if np_array.ndim == 3 and np_array.shape[2] == 1: np_array = np_array.squeeze()
+    if np_array.dtype == np.float32 or np_array.dtype == np.float64: np_array = (np_array * 255).astype(np.uint8)
+    elif np_array.dtype != np.uint8: np_array = np_array.astype(np.uint8)
+    h, w = np_array.shape
+    q_img = QImage(np_array.data, w, h, w, QImage.Format_Grayscale8)
+    pixmap = QPixmap.fromImage(q_img)
+    if target_size: pixmap = pixmap.scaled(target_size, target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return pixmap
+
+def predict_single(model, example_imgs_list, input_outline_mask):
+    if len(example_imgs_list) != NUM_EXAMPLES_CONDITION: return None
+    ex_tensors = [np.expand_dims(img, axis=0) for img in example_imgs_list]
+    ol_tensor = np.expand_dims(input_outline_mask, axis=0)
+    return model.predict(ex_tensors + [ol_tensor])[0]
+
+
+# --- Dataset Outline Mode ---
+def dataset_prediction_mode():
+    # (Same as previous predict.py, just ensure it uses BASE_GRAYSCALE_PATHS_FOR_EXAMPLES for examples
+    # and samples from ALL_AVAILABLE_OUTLINE_PATHS for the input_outline_path)
+    print("\n--- Dataset Outline Prediction Mode ---")
+    if not BASE_GRAYSCALE_PATHS_FOR_EXAMPLES or not ALL_AVAILABLE_OUTLINE_PATHS: print("Missing data for dataset mode."); return
+    num_tests = min(NUM_DATASET_TEST_ITERATIONS, len(ALL_AVAILABLE_OUTLINE_PATHS))
+    selected_outline_paths = random.sample(ALL_AVAILABLE_OUTLINE_PATHS, num_tests)
+
+    for i, ol_path in enumerate(selected_outline_paths):
+        print(f"\nTest {i+1}/{num_tests}, Outline: {os.path.basename(ol_path)}")
+        ol_img_list = load_images_from_paths([ol_path], IMG_SHAPE)
+        if not ol_img_list: continue
+        ol_img = ol_img_list[0]
+
+        ex_paths = random.sample(BASE_GRAYSCALE_PATHS_FOR_EXAMPLES, min(NUM_EXAMPLES_CONDITION, len(BASE_GRAYSCALE_PATHS_FOR_EXAMPLES)))
+        ex_imgs = load_images_from_paths(ex_paths, IMG_SHAPE)
+        if len(ex_imgs) != NUM_EXAMPLES_CONDITION: print(f"Not enough examples for {os.path.basename(ol_path)}"); continue
         
-        # Prepare 5 random example images (from base grayscales)
-        num_available_examples = len(BASE_GRAYSCALE_PATHS)
-        if num_available_examples < NUM_EXAMPLES_CONDITION:
-            selected_example_paths = random.choices(BASE_GRAYSCALE_PATHS, k=NUM_EXAMPLES_CONDITION) # Sample with replacement
-        else:
-            selected_example_paths = random.sample(BASE_GRAYSCALE_PATHS, NUM_EXAMPLES_CONDITION)
-        
-        example_images_np_list = []
-        print("  Example image files used:")
-        for p_idx, path in enumerate(selected_example_paths):
-            print(f"    Ex {p_idx+1}: {os.path.basename(path)}")
-            try:
-                img = np.load(path).reshape(IMG_SHAPE)
-                example_images_np_list.append(img)
-            except Exception as e:
-                print(f"    Error loading {path}: {e}")
-                return # Stop if an image fails to load
+        gen_img = predict_single(trained_model, ex_imgs, ol_img)
+        if gen_img is not None:
+            plt.figure(figsize=(3 * (len(ex_imgs) + 2), 3) )
+            for j, exi in enumerate(ex_imgs): plt.subplot(1,len(ex_imgs)+2,j+1); plt.imshow(exi.squeeze(),cmap='gray',vmin=0,vmax=1); plt.title(f"Ex{j+1}"); plt.axis('off')
+            plt.subplot(1,len(ex_imgs)+2,len(ex_imgs)+1); plt.imshow(ol_img.squeeze(),cmap='gray_r'); plt.title("Input OL"); plt.axis('off')
+            plt.subplot(1,len(ex_imgs)+2,len(ex_imgs)+2); plt.imshow(gen_img.squeeze(),cmap='gray',vmin=0,vmax=1); plt.title("Generated"); plt.axis('off')
+            plt.suptitle(f"Dataset Pred {i+1}"); plt.tight_layout(rect=[0,0,1,0.93]); plt.show()
+    print("--- Dataset Mode Finished ---")
 
-        if len(example_images_np_list) != NUM_EXAMPLES_CONDITION:
-            print(f"  Could not load {NUM_EXAMPLES_CONDITION} examples for test set {i+1}. Skipping.")
-            continue
+# --- PyQt5 Drawing Canvas Mode ---
+# (The DrawingScene and DrawingWindow classes can remain largely the same as your last version)
+class DrawingScene(QGraphicsScene): # (Same as your previous PyQt DrawingScene)
+    def __init__(self, parent=None): super().__init__(parent); self.current_path = None; self.points = []; self.is_drawing = False
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton: self.is_drawing = True
+        if not self.current_path or not self.is_drawing: self.current_path = QPainterPath(); self.current_path.moveTo(event.scenePos()); self.points = [event.scenePos()]
+        else: self.current_path.lineTo(event.scenePos()); self.points.append(event.scenePos())
+        self.update_path_item(); super().mousePressEvent(event)
+    def mouseMoveEvent(self, event):
+        if self.is_drawing and (event.buttons() & Qt.LeftButton):
+            if self.current_path: self.current_path.lineTo(event.scenePos()); self.points.append(event.scenePos()); self.update_path_item()
+            super().mouseMoveEvent(event)
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_drawing: self.is_drawing = False; super().mouseReleaseEvent(event)
+    def update_path_item(self):
+        items_to_remove = [item for item in self.items() if isinstance(item, QGraphicsPathItem)]; [self.removeItem(item) for item in items_to_remove]
+        if self.current_path: self.addPath(self.current_path, QPen(Qt.black, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    def clear_scene(self): self.points = []; self.current_path = None; [self.removeItem(item) for item in self.items() if isinstance(item, QGraphicsPathItem)]; self.update()
+    def get_drawn_mask(self, target_dim): # (Same as your previous version)
+        if not self.points and not self.current_path: return None
+        image = QImage(DRAWING_CANVAS_SIZE, DRAWING_CANVAS_SIZE, QImage.Format_ARGB32_Premultiplied); image.fill(Qt.white)
+        painter = QPainter(image); painter.setRenderHint(QPainter.Antialiasing)
+        if self.current_path: painter.setPen(QPen(Qt.black, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)); painter.drawPath(self.current_path)
+        if self.points and len(self.points) > 2:
+            s, e = self.points[0], self.points[-1]
+            if (s.x()-e.x())**2 + (s.y()-e.y())**2 > 15**2: cp=QPainterPath(); cp.moveTo(e); cp.lineTo(s); painter.drawPath(cp)
+        painter.end(); ptr = image.bits(); ptr.setsize(image.byteCount()); arr = np.array(ptr).reshape(image.height(),image.width(),4)
+        gray_arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2GRAY); inverted_gray = cv2.bitwise_not(gray_arr)
+        contours, _ = cv2.findContours(inverted_gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled_mask_512 = np.ones((DRAWING_CANVAS_SIZE, DRAWING_CANVAS_SIZE), dtype=np.uint8)*255
+        if contours: cv2.drawContours(filled_mask_512, [max(contours, key=cv2.contourArea)], -1, 0, thickness=cv2.FILLED)
+        scaled_mask_cv = cv2.resize(filled_mask_512, (target_dim, target_dim), interpolation=cv2.INTER_NEAREST)
+        return (scaled_mask_cv.astype(np.float32)/255.0).reshape((target_dim,target_dim,1)), scaled_mask_cv
 
-        # The StyleEncoder model expects a list of tensors, each [B, H, W, C]
-        # For prediction with a single set (B=1):
-        example_tensors_for_style_encoder = [tf.expand_dims(tf.convert_to_tensor(img_np, dtype=tf.float32), axis=0) 
-                                             for img_np in example_images_np_list]
+class DrawingWindow(QWidget): # (Same as your previous PyQt DrawingWindow)
+    def __init__(self): super().__init__(); self.example_model_inputs = []; self.initUI(); self.load_example_images()
+    def initUI(self):
+        self.setWindowTitle('Interactive Cat Gen (Hybrid Model)'); self.setGeometry(100,100,DRAWING_CANVAS_SIZE+IMG_DIM*2+100,DRAWING_CANVAS_SIZE+150)
+        ml=QVBoxLayout();self.setLayout(ml);el=QHBoxLayout();self.ex_labels=[QLabel(f"Ex{i+1}")for i in range(NUM_EXAMPLES_CONDITION)]
+        for lbl in self.ex_labels:lbl.setFixedSize(PREVIEW_IMAGE_SIZE,PREVIEW_IMAGE_SIZE);lbl.setStyleSheet("border:1px solid gray;");lbl.setAlignment(Qt.AlignCenter);el.addWidget(lbl)
+        ml.addLayout(el);drl=QHBoxLayout();ml.addLayout(drl);self.scene=DrawingScene();self.scene.setSceneRect(0,0,DRAWING_CANVAS_SIZE-2,DRAWING_CANVAS_SIZE-2)
+        self.view=QGraphicsView(self.scene);self.view.setFixedSize(DRAWING_CANVAS_SIZE,DRAWING_CANVAS_SIZE);self.view.setBackgroundBrush(Qt.white);self.view.setRenderHint(QPainter.Antialiasing)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff);self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff);drl.addWidget(self.view)
+        self.im_lbl=QLabel("InputMask");self.im_lbl.setFixedSize(IMG_DIM,IMG_DIM);self.im_lbl.setStyleSheet("border:1px solid blue;");self.im_lbl.setAlignment(Qt.AlignCenter);drl.addWidget(self.im_lbl)
+        self.gi_lbl=QLabel("GenImage");self.gi_lbl.setFixedSize(IMG_DIM,IMG_DIM);self.gi_lbl.setStyleSheet("border:1px solid green;");self.gi_lbl.setAlignment(Qt.AlignCenter);drl.addWidget(self.gi_lbl)
+        bl=QHBoxLayout();self.gen_btn=QPushButton("Gen(g)");self.gen_btn.clicked.connect(self.on_gen);self.clr_btn=QPushButton("Clr(c)");self.clr_btn.clicked.connect(self.on_clr)
+        bl.addWidget(self.gen_btn);bl.addWidget(self.clr_btn);ml.addLayout(bl);self.show()
+    def load_example_images(self):
+        if not BASE_GRAYSCALE_PATHS_FOR_EXAMPLES:return
+        num_samp=min(NUM_EXAMPLES_CONDITION,len(BASE_GRAYSCALE_PATHS_FOR_EXAMPLES));paths=random.sample(BASE_GRAYSCALE_PATHS_FOR_EXAMPLES,num_samp)
+        self.example_model_inputs=load_images_from_paths(paths,IMG_SHAPE)
+        for i in range(NUM_EXAMPLES_CONDITION):
+            if i<len(self.example_model_inputs):self.ex_labels[i].setPixmap(np_to_qpixmap(self.example_model_inputs[i],PREVIEW_IMAGE_SIZE))
+            else:self.ex_labels[i].clear();self.ex_labels[i].setText(f"Ex{i+1} N/A")
+    def on_gen(self):
+        if not self.example_model_inputs or len(self.example_model_inputs)!=NUM_EXAMPLES_CONDITION:print("No ex imgs");return
+        mdata=self.scene.get_drawn_mask(IMG_DIM);
+        if mdata is None:print("No outline");return
+        model_mask_np,disp_mask_cv=mdata;self.im_lbl.setPixmap(np_to_qpixmap(disp_mask_cv,IMG_DIM,True))
+        gen_img=predict_single(trained_model,self.example_model_inputs,model_mask_np)
+        if gen_img is not None:self.gi_lbl.setPixmap(np_to_qpixmap(gen_img,IMG_DIM));print("Generated.")
+        else:self.gi_lbl.setText("Gen Failed");print("Gen fail.")
+    def on_clr(self):self.scene.clear_scene();self.im_lbl.setText("InputMask");self.im_lbl.clear();self.gi_lbl.setText("GenImage");self.gi_lbl.clear()
+    def keyPressEvent(self,e):
+        if e.key()==Qt.Key_G:self.on_gen()
+        elif e.key()==Qt.Key_C:self.on_clr()
+        elif e.key()==Qt.Key_Q or e.key()==Qt.Key_Escape:self.close()
 
-        # Get style tokens
-        try:
-            # If style_encoder_layer is the actual StyleEncoder Model instance
-            output_style_tokens = style_encoder_model_or_layer(example_tensors_for_style_encoder)
-        except Exception as e:
-            print(f"  Error calling StyleEncoder: {e}")
-            print("  This might happen if style_encoder_model_or_layer is not the correct callable Keras Model/Layer.")
-            print("  Ensure the StyleEncoder sub-model was correctly extracted or built.")
-            continue
-
-
-        print(f"  Output Style Tokens Shape: {output_style_tokens.shape}") # Expected: (1, num_style_tokens, embed_dim_style)
-        
-        # Print some statistics of the tokens
-        # Flatten tokens for easier stats: (1, num_style_tokens * embed_dim_style)
-        tokens_flat = tf.reshape(output_style_tokens, [1, -1]).numpy().squeeze()
-        
-        print(f"  Style Tokens (first few values of flattened tokens for this set): {tokens_flat[:10]}")
-        print(f"  Mean of tokens: {np.mean(tokens_flat):.4f}, Std: {np.std(tokens_flat):.4f}, Min: {np.min(tokens_flat):.4f}, Max: {np.max(tokens_flat):.4f}")
-
-        # For more advanced: calculate cosine similarity between token sets from different inputs
-        # For now, just observe if values change with different inputs.
-
-# --- Main Execution ---
+def qt_drawing_mode(): app=QApplication.instance() or QApplication(sys.argv); ex=DrawingWindow(); sys.exit(app.exec_())
 def main():
-    if style_encoder_layer: # Check if we successfully got the layer
-        test_style_encoder(style_encoder_layer, num_test_sets=5)
-    else:
-        print("StyleEncoder could not be prepared for testing.")
-
-if __name__ == "__main__":
-    main()
+    if USE_DATASET_OUTLINES: dataset_prediction_mode()
+    if USE_DRAWING_CANVAS: qt_drawing_mode()
+if __name__=="__main__": main()
